@@ -194,7 +194,9 @@ func scanToMap(rows *sql.Rows) ([]map[string]interface{}, error) {
 		for i, col := range columns {
 			val := values[i]
 
-			if b, ok := val.([]byte); ok {
+			if t, ok := val.(time.Time); ok {
+				rowData[col] = t.In(location).Format(time.RFC3339)
+			} else if b, ok := val.([]byte); ok {
 				rowData[col] = string(b)
 			} else {
 				rowData[col] = val
