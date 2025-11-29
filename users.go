@@ -176,7 +176,7 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		expirationTime := time.Now().Add(24 * time.Hour)
+		expirationTime := time.Now().Add(30 * 24 * time.Hour)
 		claims := &jwt.RegisteredClaims{
 			Subject:   storedUser.Username,
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
