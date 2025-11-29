@@ -31,6 +31,11 @@ var stationConfigs = map[string]StationConfig{
 	},
 }
 
+type ErrorResponse struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func logsHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
@@ -45,6 +50,9 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("Estação '%s' não configurada", stationName), http.StatusNotFound)
 			return
 		}
+
+		limitDate := time.Now().In(location).AddDate(0, 0, -7)
+		isRestricted := false
 
 		columnsStr := strings.Join(config.Columns, ", ")
 		query := fmt.Sprintf("SELECT %s FROM %s", columnsStr, config.TableName)
@@ -72,9 +80,14 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 			endDate, err2 := time.ParseInLocation("2006-01-02", endDateQuery, location)
 
 			if err1 != nil || err2 != nil {
-				http.Error(w, "Formato de data inválido. Use YYYY-MM-DD para startDate e endDate", http.StatusBadRequest)
+				http.Error(w, "Formato de data inválido. Use YYYY-MM-DD", http.StatusBadRequest)
 				return
 			}
+
+			if startDate.Before(limitDate) {
+				isRestricted = true
+			}
+
 			endDate = endDate.Add(24 * time.Hour)
 
 			if strings.Contains(query, "WHERE") {
@@ -92,6 +105,11 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 				http.Error(w, "Formato de data inválido. Use YYYY-MM-DD", http.StatusBadRequest)
 				return
 			}
+
+			if startDate.Before(limitDate) {
+				isRestricted = true
+			}
+
 			endDate := startDate.Add(24 * time.Hour)
 
 			if strings.Contains(query, "WHERE") {
@@ -103,22 +121,32 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 			args = append(args, startDate, endDate)
 			query += fmt.Sprintf(" ORDER BY %s ASC", config.DateColumn)
 		} else {
-			http.Error(w, "Requisição inválida. Especifique '/latest' ou parâmetros de data", http.StatusBadRequest)
+			http.Error(w, "Requisição inválida. Use '/latest' ou parâmetro 'date'", http.StatusBadRequest)
+			return
+		}
+
+		if isRestricted {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(ErrorResponse{
+				Code:    "DATA_RESTRICTED",
+				Message: "Dados anteriores a 7 dias requerem solicitação de acesso.",
+			})
 			return
 		}
 
 		rows, err := db.Query(query, args...)
 		if err != nil {
-			http.Error(w, "Erro ao buscar dados do banco", http.StatusInternalServerError)
-			log.Printf("Erro na query: %v | Args: %v", query, args)
+			http.Error(w, "Erro ao buscar dados", http.StatusInternalServerError)
+			log.Printf("Query Error: %v", err)
 			return
 		}
 		defer rows.Close()
 
 		results, err := scanToMap(rows)
 		if err != nil {
-			http.Error(w, "Erro ao escanear os dados", http.StatusInternalServerError)
-			log.Printf("Erro no scan: %v", err)
+			http.Error(w, "Erro ao processar dados", http.StatusInternalServerError)
+			log.Printf("Scan Error: %v", err)
 			return
 		}
 
@@ -141,7 +169,8 @@ func scanToMap(rows *sql.Rows) ([]map[string]interface{}, error) {
 		return nil, err
 	}
 
-	var results []map[string]interface{}
+	results := make([]map[string]interface{}, 0)
+
 	for rows.Next() {
 		values := make([]interface{}, len(columns))
 		valuePtrs := make([]interface{}, len(columns))
@@ -168,9 +197,5 @@ func scanToMap(rows *sql.Rows) ([]map[string]interface{}, error) {
 		results = append(results, rowData)
 	}
 
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return results, nil
+	return results, rows.Err()
 }
