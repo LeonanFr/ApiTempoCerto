@@ -263,3 +263,62 @@ func authMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
+
+type AccessRequestInput struct {
+	Days int `json:"days"`
+}
+
+func requestAccessHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username, ok := r.Context().Value(userContextKey).(string)
+		if !ok {
+			http.Error(w, "Não autorizado", http.StatusUnauthorized)
+			return
+		}
+
+		var input AccessRequestInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			input.Days = 7
+		}
+		if input.Days <= 0 {
+			input.Days = 7
+		}
+
+		var userId int
+		err := db.QueryRow("SELECT id FROM users WHERE username = $1", username).Scan(&userId)
+		if err != nil {
+			http.Error(w, "Usuário não encontrado", http.StatusInternalServerError)
+			return
+		}
+
+		var count int
+		err = db.QueryRow("SELECT COUNT(*) FROM access_requests WHERE user_id = $1 AND status = 'PENDING'", userId).Scan(&count)
+		if err != nil {
+			http.Error(w, "Erro ao verificar solicitações", http.StatusInternalServerError)
+			return
+		}
+
+		if count > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"message": "Você já possui uma solicitação em análise."})
+			return
+		}
+
+		_, err = db.Exec("INSERT INTO access_requests (user_id, status, requested_days) VALUES ($1, 'PENDING', $2)", userId, input.Days)
+		if err != nil {
+			if strings.Contains(err.Error(), "idx_unique_pending_request") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]string{"message": "Você já possui uma solicitação em análise."})
+				return
+			}
+			log.Printf("Erro ao salvar solicitação: %v", err)
+			http.Error(w, "Erro ao processar solicitação", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Solicitação de %d dias enviada com sucesso", input.Days)
+	}
+}

@@ -51,7 +51,21 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		limitDate := time.Now().In(location).AddDate(0, 0, -7)
+		var lastDataDate time.Time
+
+		lastDateQuery := fmt.Sprintf("SELECT MAX(%s) FROM %s", config.DateColumn, config.TableName)
+		if config.TableName == "datalogger_raw" && stationName == "soure" {
+			lastDateQuery += " WHERE station_id = 2"
+		}
+
+		err := db.QueryRow(lastDateQuery).Scan(&lastDataDate)
+		if err != nil {
+			lastDataDate = time.Now().In(location)
+		} else {
+			lastDataDate = lastDataDate.In(location)
+		}
+
+		limitDate := lastDataDate.AddDate(0, 0, -7)
 		isRestricted := false
 
 		columnsStr := strings.Join(config.Columns, ", ")
@@ -63,7 +77,7 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 		if config.TableName == "datalogger_raw" {
 			if stationName == "soure" {
 				query += fmt.Sprintf(" WHERE station_id = $%d", argCounter)
-				args = append(args, 1)
+				args = append(args, 2)
 				argCounter++
 			}
 		}
@@ -78,9 +92,8 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 		} else if startDateQuery != "" && endDateQuery != "" {
 			startDate, err1 := time.ParseInLocation("2006-01-02", startDateQuery, location)
 			endDate, err2 := time.ParseInLocation("2006-01-02", endDateQuery, location)
-
 			if err1 != nil || err2 != nil {
-				http.Error(w, "Formato de data inválido. Use YYYY-MM-DD", http.StatusBadRequest)
+				http.Error(w, "Formato de data inválido", http.StatusBadRequest)
 				return
 			}
 
@@ -102,7 +115,7 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 		} else if dateQuery != "" {
 			startDate, err := time.ParseInLocation("2006-01-02", dateQuery, location)
 			if err != nil {
-				http.Error(w, "Formato de data inválido. Use YYYY-MM-DD", http.StatusBadRequest)
+				http.Error(w, "Formato de data inválido", http.StatusBadRequest)
 				return
 			}
 
@@ -120,9 +133,23 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 
 			args = append(args, startDate, endDate)
 			query += fmt.Sprintf(" ORDER BY %s ASC", config.DateColumn)
+
 		} else {
-			http.Error(w, "Requisição inválida. Use '/latest' ou parâmetro 'date'", http.StatusBadRequest)
+			http.Error(w, "Requisição inválida", http.StatusBadRequest)
 			return
+		}
+
+		if isRestricted {
+			username, ok := r.Context().Value(userContextKey).(string)
+			if ok {
+				var accessUntil sql.NullTime
+				err := db.QueryRow("SELECT history_access_until FROM users WHERE username = $1", username).
+					Scan(&accessUntil)
+
+				if err == nil && accessUntil.Valid && accessUntil.Time.After(time.Now()) {
+					isRestricted = false
+				}
+			}
 		}
 
 		if isRestricted {
@@ -130,7 +157,7 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(ErrorResponse{
 				Code:    "DATA_RESTRICTED",
-				Message: "Dados anteriores a 7 dias requerem solicitação de acesso.",
+				Message: "Dados antigos arquivados (regra de 7 dias do último registro).",
 			})
 			return
 		}
@@ -146,11 +173,11 @@ func logsHandler(db *sql.DB) http.HandlerFunc {
 		results, err := scanToMap(rows)
 		if err != nil {
 			http.Error(w, "Erro ao processar dados", http.StatusInternalServerError)
-			log.Printf("Scan Error: %v", err)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+
 		if isLatestRequest {
 			if len(results) == 0 {
 				json.NewEncoder(w).Encode(nil)

@@ -41,6 +41,7 @@ func main() {
 
 	http.HandleFunc("/register", registerHandler(db))
 	http.HandleFunc("/login", loginHandler(db))
+	http.Handle("/request-access", authMiddleware(requestAccessHandler(db)))
 	http.Handle("/logs/", authMiddleware(logsHandler(db)))
 	http.Handle("/me", authMiddleware(meHandler(db)))
 
