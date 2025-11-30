@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -44,8 +43,18 @@ type User struct {
 	Name         string `json:"name"`
 	Username     string `json:"username"`
 	Email        string `json:"email"`
+	Phone        string `json:"phone"`
 	PasswordHash string `json:"-"`
 	Password     string `json:"password,omitempty"`
+}
+
+type RegisterInput struct {
+	Name     string `json:"name"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Phone    string `json:"phone"`
+	Password string `json:"password"`
+	OtpCode  string `json:"otp_code"`
 }
 
 func hashPassword(password string) (string, error) {
@@ -65,7 +74,7 @@ func hashPassword(password string) (string, error) {
 func checkPasswordHash(password, storedHash string) (bool, error) {
 	parts := strings.Split(storedHash, ":")
 	if len(parts) != 2 {
-		return false, fmt.Errorf("hash armazenado em formato inválido")
+		return false, fmt.Errorf("hash inválido")
 	}
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[0])
@@ -79,7 +88,7 @@ func checkPasswordHash(password, storedHash string) (bool, error) {
 	}
 
 	if uint32(len(hash)) != params.keyLength {
-		return false, fmt.Errorf("hash com comprimento inesperado")
+		return false, fmt.Errorf("tamanho inválido do hash")
 	}
 
 	comparisonHash := argon2.IDKey([]byte(password), salt, params.iterations, params.memory, params.parallelism, params.keyLength)
@@ -89,48 +98,100 @@ func checkPasswordHash(password, storedHash string) (bool, error) {
 
 func registerHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var user User
-		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+		var input RegisterInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			http.Error(w, "Requisição inválida", http.StatusBadRequest)
 			return
 		}
 
-		if user.Name == "" || user.Username == "" || user.Email == "" || user.Password == "" {
-			http.Error(w, "Nome, usuário, email e senha são obrigatórios", http.StatusBadRequest)
+		if input.Name == "" || input.Username == "" || input.Password == "" {
+			http.Error(w, "Nome, usuário e senha são obrigatórios", http.StatusBadRequest)
 			return
 		}
 
-		passwordHash, err := hashPassword(user.Password)
+		if input.Email == "" && input.Phone == "" {
+			http.Error(w, "Email ou Telefone deve ser informado", http.StatusBadRequest)
+			return
+		}
+
+		if input.OtpCode == "" {
+			http.Error(w, "O código de verificação é obrigatório", http.StatusBadRequest)
+			return
+		}
+
+		var identifier string
+		var channelType string
+
+		if input.Phone != "" {
+			identifier = input.Phone
+			channelType = "SMS"
+		} else {
+			identifier = input.Email
+			channelType = "EMAIL"
+		}
+
+		var otpId int
+		err := db.QueryRow(`
+			SELECT id FROM verification_codes 
+			WHERE identifier = $1 AND code = $2 AND type = $3 AND expires_at > NOW()`,
+			identifier, input.OtpCode, channelType).Scan(&otpId)
+
+		if err == sql.ErrNoRows {
+			http.Error(w, "Código inválido ou expirado", http.StatusUnauthorized)
+			return
+		} else if err != nil {
+			http.Error(w, "Erro interno", http.StatusInternalServerError)
+			return
+		}
+
+		db.Exec("DELETE FROM verification_codes WHERE id = $1", otpId)
+
+		passwordHash, err := hashPassword(input.Password)
 		if err != nil {
-			log.Printf("Erro ao gerar hash: %v", err)
 			http.Error(w, "Erro ao processar senha", http.StatusInternalServerError)
 			return
 		}
 
-		sqlStatement := `
-		INSERT INTO users (name, username, email, password_hash)
-		VALUES ($1, $2, $3, $4)`
+		isPhoneVerified := (channelType == "SMS")
+		isEmailVerified := (channelType == "EMAIL")
 
-		_, err = db.Exec(sqlStatement, user.Name, user.Username, user.Email, passwordHash)
+		sqlStatement := `
+		INSERT INTO users (name, username, email, phone, password_hash, is_phone_verified, is_email_verified)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+
+		var emailVal interface{} = input.Email
+		if input.Email == "" {
+			emailVal = nil
+		}
+
+		var phoneVal interface{} = input.Phone
+		if input.Phone == "" {
+			phoneVal = nil
+		}
+
+		_, err = db.Exec(sqlStatement, input.Name, input.Username, emailVal, phoneVal, passwordHash, isPhoneVerified, isEmailVerified)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				if pgErr.ConstraintName == "users_username_key" {
+				if strings.Contains(pgErr.ConstraintName, "username") {
 					http.Error(w, "Nome de usuário já existe", http.StatusConflict)
 					return
 				}
-				if pgErr.ConstraintName == "users_email_key" {
+				if strings.Contains(pgErr.ConstraintName, "email") {
 					http.Error(w, "Email já cadastrado", http.StatusConflict)
 					return
 				}
+				if strings.Contains(pgErr.ConstraintName, "phone") {
+					http.Error(w, "Telefone já cadastrado", http.StatusConflict)
+					return
+				}
 			}
-			log.Printf("Erro ao inserir usuário: %v", err)
-			http.Error(w, "Erro ao cadastrar usuário", http.StatusInternalServerError)
+			http.Error(w, "Erro ao cadastrar", http.StatusInternalServerError)
 			return
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, "Usuário '%s' criado com sucesso", user.Username)
+		fmt.Fprintf(w, "Usuário '%s' criado e verificado com sucesso", input.Username)
 	}
 }
 
@@ -144,7 +205,7 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 
 		var storedUser User
 		sqlStatement := `
-		SELECT id, name, username, email, password_hash
+		SELECT id, name, username, COALESCE(email, ''), COALESCE(phone, ''), password_hash
 		FROM users WHERE username = $1`
 
 		err := db.QueryRow(sqlStatement, credentials.Username).Scan(
@@ -152,6 +213,7 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 			&storedUser.Name,
 			&storedUser.Username,
 			&storedUser.Email,
+			&storedUser.Phone,
 			&storedUser.PasswordHash,
 		)
 
@@ -160,26 +222,20 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 				http.Error(w, "Usuário ou senha inválidos", http.StatusUnauthorized)
 				return
 			}
-			http.Error(w, "Erro interno do servidor", http.StatusInternalServerError)
+			http.Error(w, "Erro interno", http.StatusInternalServerError)
 			return
 		}
 
 		match, err := checkPasswordHash(credentials.Password, storedUser.PasswordHash)
-		if err != nil {
-			log.Printf("Erro ao verificar hash: %v", err)
+		if err != nil || !match {
 			http.Error(w, "Usuário ou senha inválidos", http.StatusUnauthorized)
 			return
 		}
 
-		if !match {
-			http.Error(w, "Usuário ou senha inválidos", http.StatusUnauthorized)
-			return
-		}
-
-		expirationTime := time.Now().Add(30 * 24 * time.Hour)
+		exp := time.Now().Add(30 * 24 * time.Hour)
 		claims := &jwt.RegisteredClaims{
 			Subject:   storedUser.Username,
-			ExpiresAt: jwt.NewNumericDate(expirationTime),
+			ExpiresAt: jwt.NewNumericDate(exp),
 		}
 
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -190,9 +246,7 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"token": tokenString,
-		})
+		json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
 	}
 }
 
@@ -200,18 +254,19 @@ func meHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		username, ok := r.Context().Value(userContextKey).(string)
 		if !ok {
-			http.Error(w, "Erro ao ler usuário do contexto", http.StatusInternalServerError)
+			http.Error(w, "Erro interno", http.StatusInternalServerError)
 			return
 		}
 
 		var user User
-		sqlStatement := `SELECT id, name, username, email FROM users WHERE username = $1`
+		sqlStatement := `SELECT id, name, username, COALESCE(email, ''), COALESCE(phone, '') FROM users WHERE username = $1`
 
 		err := db.QueryRow(sqlStatement, username).Scan(
 			&user.ID,
 			&user.Name,
 			&user.Username,
 			&user.Email,
+			&user.Phone,
 		)
 
 		if err != nil {
@@ -219,7 +274,7 @@ func meHandler(db *sql.DB) http.HandlerFunc {
 				http.Error(w, "Usuário não encontrado", http.StatusNotFound)
 				return
 			}
-			http.Error(w, "Erro ao buscar usuário", http.StatusInternalServerError)
+			http.Error(w, "Erro interno", http.StatusInternalServerError)
 			return
 		}
 
@@ -232,13 +287,13 @@ func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			http.Error(w, "Cabeçalho de autorização ausente", http.StatusUnauthorized)
+			http.Error(w, "Não autorizado", http.StatusUnauthorized)
 			return
 		}
 
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 		if tokenString == authHeader {
-			http.Error(w, "Formato do token inválido", http.StatusUnauthorized)
+			http.Error(w, "Token inválido", http.StatusUnauthorized)
 			return
 		}
 
@@ -254,7 +309,7 @@ func authMiddleware(next http.Handler) http.Handler {
 
 		username, err := claims.GetSubject()
 		if err != nil {
-			http.Error(w, "Token inválido (sem subject)", http.StatusUnauthorized)
+			http.Error(w, "Token inválido", http.StatusUnauthorized)
 			return
 		}
 
@@ -294,7 +349,7 @@ func requestAccessHandler(db *sql.DB) http.HandlerFunc {
 		var count int
 		err = db.QueryRow("SELECT COUNT(*) FROM access_requests WHERE user_id = $1 AND status = 'PENDING'", userId).Scan(&count)
 		if err != nil {
-			http.Error(w, "Erro ao verificar solicitações", http.StatusInternalServerError)
+			http.Error(w, "Erro interno", http.StatusInternalServerError)
 			return
 		}
 
@@ -313,7 +368,6 @@ func requestAccessHandler(db *sql.DB) http.HandlerFunc {
 				json.NewEncoder(w).Encode(map[string]string{"message": "Você já possui uma solicitação em análise."})
 				return
 			}
-			log.Printf("Erro ao salvar solicitação: %v", err)
 			http.Error(w, "Erro ao processar solicitação", http.StatusInternalServerError)
 			return
 		}

@@ -23,6 +23,26 @@ func main() {
 		log.Fatal("A variável de ambiente JWT_SECRET_KEY não foi definida")
 	}
 
+	twilioSID := os.Getenv("TWILIO_ACCOUNT_SID")
+	twilioToken := os.Getenv("TWILIO_AUTH_TOKEN")
+	twilioFrom := os.Getenv("TWILIO_PHONE_NUMBER")
+
+	if twilioSID != "" && twilioToken != "" {
+		notifier.SMS = &TwilioProvider{
+			AccountSID: twilioSID,
+			AuthToken:  twilioToken,
+			FromPhone:  twilioFrom,
+		}
+		fmt.Println("Serviço de SMS (Twilio) ativado.")
+	} else {
+		fmt.Println("AVISO: Variáveis do Twilio não encontradas. SMS não funcionará.")
+	}
+
+	notifier.Email = &SendGridProvider{
+		APIKey:      os.Getenv("SENDGRID_API_KEY"),
+		FromAddress: "no-reply@tempocerto.com",
+	}
+
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
 		log.Fatal("A variável de ambiente DATABASE_URL não foi definida")
@@ -45,11 +65,9 @@ func main() {
 	http.Handle("/logs/", authMiddleware(logsHandler(db)))
 	http.Handle("/me", authMiddleware(meHandler(db)))
 
+	http.HandleFunc("/auth/send-otp", sendOTPHandler(db))
+	http.HandleFunc("/auth/verify-otp", verifyOTPHandler(db))
+
 	fmt.Println("Servidor iniciado na porta 8080")
-	fmt.Println("Endpoints disponíveis:")
-	fmt.Println("  - POST /register")
-	fmt.Println("  - POST /login")
-	fmt.Println("  - GET /logs/{nome_da_estacao}/latest (Protegido)")
-	fmt.Println("  - GET /logs/{nome_da_estacao}?date=YYYY-MM-DD (Protegido)")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
