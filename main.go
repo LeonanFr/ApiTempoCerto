@@ -70,6 +70,9 @@ func main() {
 	http.HandleFunc("/auth/forgot-password", requestPasswordResetHandler(db))
 	http.HandleFunc("/auth/reset-password", resetPasswordHandler(db))
 
+	http.Handle("/admin/requests", authMiddleware(adminListRequestsHandler(db)))
+	http.Handle("/admin/approve", authMiddleware(adminApproveRequestHandler(db)))
+
 	fmt.Println("Servidor iniciado na porta 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
