@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -50,14 +51,72 @@ func (t *TwilioProvider) Send(to string, message string) error {
 	return fmt.Errorf("erro Twilio (Status %d): %v", resp.StatusCode, errorResp["message"])
 }
 
+type SGData struct {
+	Personalizations []SGPersonalization `json:"personalizations"`
+	From             SGContact           `json:"from"`
+	Content          []SGContent         `json:"content"`
+}
+type SGPersonalization struct {
+	To      []SGContact `json:"to"`
+	Subject string      `json:"subject"`
+}
+type SGContact struct {
+	Email string `json:"email"`
+}
+type SGContent struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
 type SendGridProvider struct {
 	APIKey      string
 	FromAddress string
 }
 
 func (s *SendGridProvider) Send(to string, message string) error {
-	fmt.Printf("[MOCK SENDGRID] Enviando Email para %s: %s\n", to, message)
-	return nil
+	url := "https://api.sendgrid.com/v3/mail/send"
+
+	payload := SGData{
+		Personalizations: []SGPersonalization{
+			{
+				To:      []SGContact{{Email: to}},
+				Subject: "Seu código de verificação TempoCerto",
+			},
+		},
+		From: SGContact{Email: s.FromAddress},
+		Content: []SGContent{
+			{
+				Type:  "text/plain",
+				Value: message,
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Authorization", "Bearer "+s.APIKey)
+	req.Header.Add("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	return fmt.Errorf("erro SendGrid (Status %d)", resp.StatusCode)
 }
 
 type NotificationService struct {

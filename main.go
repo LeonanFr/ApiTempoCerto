@@ -40,7 +40,7 @@ func main() {
 
 	notifier.Email = &SendGridProvider{
 		APIKey:      os.Getenv("SENDGRID_API_KEY"),
-		FromAddress: "no-reply@tempocerto.com",
+		FromAddress: "lofufpa@outlook.com",
 	}
 
 	connStr := os.Getenv("DATABASE_URL")
@@ -67,6 +67,8 @@ func main() {
 
 	http.HandleFunc("/auth/send-otp", sendOTPHandler(db))
 	http.HandleFunc("/auth/verify-otp", verifyOTPHandler(db))
+	http.HandleFunc("/auth/forgot-password", requestPasswordResetHandler(db))
+	http.HandleFunc("/auth/reset-password", resetPasswordHandler(db))
 
 	fmt.Println("Servidor iniciado na porta 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
